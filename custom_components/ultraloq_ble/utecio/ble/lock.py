@@ -104,9 +104,12 @@ class UtecBleLock(UtecBleDevice):
 
         return await self.execute(queue)
 
-    async def async_update_status(self) -> bool:
-        # A poll displaced by a user command is redundant: lock/unlock queue
-        # LOCK_STATUS themselves. Skip rather than queue behind or raise.
+    async def async_update_status(self, skip_if_busy: bool = False) -> bool:
+        # The caller owns this policy, not this method. A background poll
+        # displaced by a user command is redundant (lock/unlock queue
+        # LOCK_STATUS themselves) and passes skip_if_busy=True. A user-driven
+        # refresh -- the rescan button -- must wait and report, never silently
+        # no-op, so it takes the default.
         def queue():
             self.add_request(
                 UtecBleRequest(
@@ -123,6 +126,6 @@ class UtecBleLock(UtecBleDevice):
                 self.add_request(UtecBleRequest(BLECommandCode.GET_AUTOLOCK))
 
         self.debug("Updating Ultraloq lock data")
-        sent = await self.execute(queue, skip_if_busy=True)
+        sent = await self.execute(queue, skip_if_busy=skip_if_busy)
         self.debug("Ultraloq lock update %s", "completed" if sent else "skipped")
         return sent

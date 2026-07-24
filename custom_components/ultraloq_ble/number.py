@@ -14,11 +14,6 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, UTEC_LOCKDATA
-from .utecio.ble.device import (
-    UtecBleDeviceBusyError,
-    UtecBleDeviceError,
-    UtecBleNotFoundError,
-)
 from .utecio.ble.lock import UtecBleLock
 from .utecio.enums import DeviceLockStatus
 
@@ -97,14 +92,12 @@ class UltraloqAutolockNumber(NumberEntity):
         """Set the auto-lock timer in seconds."""
 
         seconds = int(value)
-        try:
-            await self.lock.async_set_autolock(seconds)
-        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError):
-            raise
-        else:
-            self.async_write_ha_state()
-            for callback_func in list(self.lock._ha_state_callbacks):
-                callback_func()
+        # Errors propagate to HA unchanged; state is only written once the lock
+        # has actually accepted the new value.
+        await self.lock.async_set_autolock(seconds)
+        self.async_write_ha_state()
+        for callback_func in list(self.lock._ha_state_callbacks):
+            callback_func()
 
     async def async_added_to_hass(self) -> None:
         """Register shared state callback."""

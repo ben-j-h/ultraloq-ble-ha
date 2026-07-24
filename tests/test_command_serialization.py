@@ -279,11 +279,8 @@ async def test_is_busy_reflects_lock_state():
     assert device.is_busy is False
 
 
-@pytest.mark.asyncio
-async def test_async_update_status_passes_skip_if_busy(enrolled_u_bolt):
-    """The poll path is pinned to skip_if_busy=True so it never blocks."""
-
-    ble_lock = UtecBleLock.from_enrollment(enrolled_u_bolt)
+def _capture_execute(ble_lock):
+    """Replace execute() with a spy and return the captured kwargs dict."""
 
     captured_kwargs = {}
 
@@ -292,7 +289,33 @@ async def test_async_update_status_passes_skip_if_busy(enrolled_u_bolt):
         return False
 
     ble_lock.execute = fake_execute
+    return captured_kwargs
+
+
+@pytest.mark.asyncio
+async def test_update_status_defaults_to_waiting(enrolled_u_bolt):
+    """A user-driven refresh must wait, not silently no-op.
+
+    The rescan button calls async_update_status() with no arguments. If this
+    defaulted to skip_if_busy=True, pressing rescan while the device was busy
+    would report success while doing nothing at all.
+    """
+
+    ble_lock = UtecBleLock.from_enrollment(enrolled_u_bolt)
+    captured_kwargs = _capture_execute(ble_lock)
 
     await ble_lock.async_update_status()
+
+    assert captured_kwargs.get("skip_if_busy") is False
+
+
+@pytest.mark.asyncio
+async def test_update_status_forwards_skip_if_busy(enrolled_u_bolt):
+    """The background poll opts in explicitly and is allowed to be skipped."""
+
+    ble_lock = UtecBleLock.from_enrollment(enrolled_u_bolt)
+    captured_kwargs = _capture_execute(ble_lock)
+
+    await ble_lock.async_update_status(skip_if_busy=True)
 
     assert captured_kwargs.get("skip_if_busy") is True

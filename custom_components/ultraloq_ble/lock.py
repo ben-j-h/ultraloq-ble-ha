@@ -385,7 +385,11 @@ class UtecLock(LockEntity):
         LOGGER.debug("Updating Ultraloq lock; scan interval=%s", self.scaninterval)
         self._update_in_progress = True
         try:
-            await self.lock.async_update_status()
+            # Background poll: if a user command holds the device this refresh
+            # is redundant, so skip it rather than queue behind or raise. The
+            # rescan button deliberately does not pass this -- a user-driven
+            # refresh must wait and report rather than silently no-op.
+            await self.lock.async_update_status(skip_if_busy=True)
             self._sync_state_from_lock()
             LOGGER.debug("Ultraloq lock updated")
         except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
