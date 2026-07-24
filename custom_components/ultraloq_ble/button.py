@@ -11,7 +11,11 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, UTEC_LOCKDATA
-from .utecio.ble.device import UtecBleDeviceError, UtecBleNotFoundError
+from .utecio.ble.device import (
+    UtecBleDeviceBusyError,
+    UtecBleDeviceError,
+    UtecBleNotFoundError,
+)
 from .utecio.ble.lock import UtecBleLock
 
 
@@ -67,7 +71,7 @@ class UltraloqRescanButton(ButtonEntity):
 
         try:
             await self.lock.async_update_status()
-        except (UtecBleDeviceError, UtecBleNotFoundError) as err:
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as err:
             raise HomeAssistantError(
                 f"Failed to rescan {self.lock.name}: {err}"
             ) from err

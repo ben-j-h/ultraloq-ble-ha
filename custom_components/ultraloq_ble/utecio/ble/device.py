@@ -29,6 +29,8 @@ from ..enums import BLECommandCode, BleResponseCode, DeviceKeyUUID, DeviceServic
 from ..util import bytes_to_int2, decode_password
 
 RESPONSE_TIMEOUT_SECONDS = 15
+# A full command cycle is ~5.7s; this only trips if the BLE stack has wedged.
+COMMAND_LOCK_TIMEOUT_SECONDS = 60
 
 
 class UtecBleNotFoundError(Exception):
@@ -89,6 +91,9 @@ class UtecBleDevice:
             device_model
         )
         self._requests: list[UtecBleRequest] = []
+        # Response currently receiving notifications on the shared DATA
+        # characteristic subscription held by send_requests().
+        self._active_response: UtecBleResponse | None = None
         self.config: dict[str, Any]
         self.async_bledevice_callback = async_bledevice_callback
         self.error_callback = error_callback
@@ -100,8 +105,16 @@ class UtecBleDevice:
         self.bolt_status: int = -1
         self.sn: str = ""
         self.calendar: datetime.datetime
-        self.is_busy = False
+        # Serializes queue-then-send so concurrent callers cannot drain each
+        # other's requests or cross-deliver notifications. See execute().
+        self._command_lock = asyncio.Lock()
         self.device_time_offset: datetime.timedelta
+
+    @property
+    def is_busy(self) -> bool:
+        """Whether a command sequence currently holds the device."""
+
+        return self._command_lock.locked()
 
     @staticmethod
     def _resolve_capabilities(device_model: str) -> DeviceDefinition:
@@ -178,8 +191,66 @@ class UtecBleDevice:
         else:
             self._requests.append(request)
 
+    async def execute(
+        self,
+        queue_commands: Callable[[], None],
+        *,
+        skip_if_busy: bool = False,
+        timeout: float = COMMAND_LOCK_TIMEOUT_SECONDS,
+    ) -> bool:
+        """Queue a command sequence and send it, exclusively.
+
+        `_requests` is shared device state and send_requests() drains all of it,
+        so queueing and sending must be atomic. If two callers interleave, the
+        first drains both sets of commands and the second finds an empty queue.
+        Holding the mutex across both halves is what prevents that, which is why
+        callers pass a closure instead of queueing themselves.
+
+        `skip_if_busy` is for callers whose work is redundant if something else
+        already holds the device -- a status poll displaced by a user command is
+        not a failure worth raising. User commands wait instead; a dropped
+        unlock is never acceptable.
+
+        Returns True if commands were sent, False if the sequence was skipped or
+        queued nothing.
+        """
+
+        if skip_if_busy and self._command_lock.locked():
+            self.debug("Skipping Ultraloq request sequence; device is busy")
+            return False
+
+        try:
+            await asyncio.wait_for(self._command_lock.acquire(), timeout)
+        except TimeoutError:
+            raise self.error(
+                UtecBleDeviceBusyError(
+                    "Unable to process Ultraloq requests.",
+                    f"Device stayed busy for more than {timeout:g}s.",
+                )
+            ) from None
+
+        try:
+            # Any leftovers here mean an earlier caller queued and then failed
+            # before sending. Sending its commands now would be wrong.
+            if self._requests:
+                self.debug(
+                    "Discarding %d stale Ultraloq request(s)", len(self._requests)
+                )
+                self._requests.clear()
+
+            queue_commands()
+
+            if not self._requests:
+                self.debug("No Ultraloq commands queued; nothing to send")
+                return False
+
+            return await self.send_requests()
+        finally:
+            self._command_lock.release()
+
     async def send_requests(self) -> bool:
         client: BleakClient = None
+        notifications_started = False
         try:
             if len(self._requests) < 1:
                 raise self.error(
@@ -189,7 +260,6 @@ class UtecBleDevice:
                     )
                 )
 
-            self.is_busy = True
             try:
                 if not (device := await self._get_bledevice(self.mac_uuid)):
                     raise BleakNotFoundError()
@@ -240,6 +310,24 @@ class UtecBleDevice:
                     )
                 ) from None
 
+            # Subscribe once for the whole connection and route each notification
+            # to the request currently in flight.
+            #
+            # Previously every request called start_notify/stop_notify on the same
+            # DATA characteristic. Completed requests stayed attached, so a single
+            # unlock had every earlier response object re-parsing every later
+            # notification. It also cost two extra GATT round trips per request.
+            async def _dispatch_notification(sender, data):
+                response = self._active_response
+                if response is not None:
+                    await response._receive_write_response(sender, data)
+
+            self._active_response = None
+            await client.start_notify(
+                DeviceServiceUUID.DATA.value, _dispatch_notification
+            )
+            notifications_started = True
+
             for request in self._requests[:]:
                 if not request.sent or not request.response.completed:
                     request.aes_key = aes_key
@@ -257,12 +345,26 @@ class UtecBleDevice:
                             )
                         ) from None
 
+            # Reaching here means every queued command got a response. Without
+            # this the declared "-> bool" was always None, so neither callers
+            # nor execute() could tell success from a skipped sequence.
+            return True
+
         except Exception:  # unhandled
             raise
 
         finally:
             self._requests.clear()
+            self._active_response = None
             if client:
+                if notifications_started:
+                    try:
+                        await client.stop_notify(DeviceServiceUUID.DATA.value)
+                    except Exception as err:
+                        logger.debug(
+                            "Failed to stop Ultraloq notifications (%s)",
+                            type(err).__name__,
+                        )
                 try:
                     await client.disconnect()
                 except TimeoutError as err:
@@ -275,7 +377,6 @@ class UtecBleDevice:
                         "Unexpected error while disconnecting from an Ultraloq lock (%s)",
                         type(err).__name__,
                     )
-            self.is_busy = False
 
     async def _get_bledevice(self, address: str) -> BLEDevice:
         device = (
@@ -440,11 +541,11 @@ class UtecBleRequest:
 
     async def _get_response(self, client: BleakClient):
         self.response = UtecBleResponse(self, self.device)
-        notification_started = False
         try:
             logger.debug("Sending Ultraloq command %s", self.command.name)
-            await client.start_notify(self.uuid, self.response._receive_write_response)
-            notification_started = True
+            # send_requests() holds a single subscription for the connection and
+            # dispatches to whichever response is active, so only claim it here.
+            self.device._active_response = self.response
             await client.write_gatt_char(
                 self.uuid, self.encrypted_package(self.aes_key)
             )
@@ -484,14 +585,10 @@ class UtecBleRequest:
         except Exception as e:
             raise self.device.error(e)
         finally:
-            if notification_started:
-                try:
-                    await client.stop_notify(self.uuid)
-                except Exception as err:
-                    logger.debug(
-                        "Failed to stop Ultraloq notifications (%s)",
-                        type(err).__name__,
-                    )
+            # Stop routing notifications to this response; the connection-wide
+            # subscription is torn down by send_requests().
+            if self.device._active_response is self.response:
+                self.device._active_response = None
 
 
 class UtecBleResponse:
@@ -737,6 +834,9 @@ class UtecBleDeviceKey:
             await client.stop_notify(DeviceKeyUUID.ECC.value)
             device.debug("Received ECC public key")
 
+            # The lock generates an ephemeral keypair per session -- three
+            # consecutive handshakes produced three different public keys -- so
+            # the ~2.3s spent waiting for this key cannot be cached away.
             rec_key_point = Point(
                 SECP128r1.curve,
                 int.from_bytes(received_pubkey[0], "little"),
