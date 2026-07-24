@@ -14,7 +14,11 @@ from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceIn
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, UTEC_LOCKDATA
-from .utecio.ble.device import UtecBleDeviceError, UtecBleNotFoundError
+from .utecio.ble.device import (
+    UtecBleDeviceBusyError,
+    UtecBleDeviceError,
+    UtecBleNotFoundError,
+)
 from .utecio.ble.lock import UtecBleLock
 from .utecio.enums import DeviceLockStatus
 
@@ -95,7 +99,7 @@ class UltraloqAutolockNumber(NumberEntity):
         seconds = int(value)
         try:
             await self.lock.async_set_autolock(seconds)
-        except (UtecBleDeviceError, UtecBleNotFoundError):
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError):
             raise
         else:
             self.async_write_ha_state()

@@ -29,7 +29,11 @@ from .const import (
     LOGGER,
     UTEC_LOCKDATA,
 )
-from .utecio.ble.device import UtecBleDeviceError, UtecBleNotFoundError
+from .utecio.ble.device import (
+    UtecBleDeviceBusyError,
+    UtecBleDeviceError,
+    UtecBleNotFoundError,
+)
 from .utecio.ble.lock import UtecBleLock
 from .utecio.enums import DeviceBatteryLevel, DeviceLockStatus, DeviceLockWorkMode
 
@@ -384,7 +388,7 @@ class UtecLock(LockEntity):
             await self.lock.async_update_status()
             self._sync_state_from_lock()
             LOGGER.debug("Ultraloq lock updated")
-        except (UtecBleDeviceError, UtecBleNotFoundError) as e:
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
             LOGGER.error("Ultraloq lock update failed (%s)", type(e).__name__)
         finally:
             self._update_in_progress = False
@@ -402,7 +406,7 @@ class UtecLock(LockEntity):
             self._sync_state_from_lock()
             self._notify_lock_state_listeners()
             self.async_write_ha_state()
-        except (UtecBleDeviceError, UtecBleNotFoundError) as e:
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
             self._clear_transition_state()
             self.async_write_ha_state()
             LOGGER.error("Ultraloq lock command failed (%s)", type(e).__name__)
@@ -425,7 +429,7 @@ class UtecLock(LockEntity):
                     timedelta(seconds=self.lock.autolock_time),
                     self._handle_autolock_due,
                 )
-        except (UtecBleDeviceError, UtecBleNotFoundError) as e:
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
             self._clear_transition_state()
             self.async_write_ha_state()
             LOGGER.error("Ultraloq unlock command failed (%s)", type(e).__name__)
