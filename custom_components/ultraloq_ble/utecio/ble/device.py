@@ -89,6 +89,9 @@ class UtecBleDevice:
             device_model
         )
         self._requests: list[UtecBleRequest] = []
+        # Response currently receiving notifications on the shared DATA
+        # characteristic subscription held by send_requests().
+        self._active_response: UtecBleResponse | None = None
         self.config: dict[str, Any]
         self.async_bledevice_callback = async_bledevice_callback
         self.error_callback = error_callback
@@ -180,6 +183,7 @@ class UtecBleDevice:
 
     async def send_requests(self) -> bool:
         client: BleakClient = None
+        notifications_started = False
         try:
             if len(self._requests) < 1:
                 raise self.error(
@@ -240,6 +244,24 @@ class UtecBleDevice:
                     )
                 ) from None
 
+            # Subscribe once for the whole connection and route each notification
+            # to the request currently in flight.
+            #
+            # Previously every request called start_notify/stop_notify on the same
+            # DATA characteristic. Completed requests stayed attached, so a single
+            # unlock had every earlier response object re-parsing every later
+            # notification. It also cost two extra GATT round trips per request.
+            async def _dispatch_notification(sender, data):
+                response = self._active_response
+                if response is not None:
+                    await response._receive_write_response(sender, data)
+
+            self._active_response = None
+            await client.start_notify(
+                DeviceServiceUUID.DATA.value, _dispatch_notification
+            )
+            notifications_started = True
+
             for request in self._requests[:]:
                 if not request.sent or not request.response.completed:
                     request.aes_key = aes_key
@@ -262,7 +284,16 @@ class UtecBleDevice:
 
         finally:
             self._requests.clear()
+            self._active_response = None
             if client:
+                if notifications_started:
+                    try:
+                        await client.stop_notify(DeviceServiceUUID.DATA.value)
+                    except Exception as err:
+                        logger.debug(
+                            "Failed to stop Ultraloq notifications (%s)",
+                            type(err).__name__,
+                        )
                 try:
                     await client.disconnect()
                 except TimeoutError as err:
@@ -440,11 +471,11 @@ class UtecBleRequest:
 
     async def _get_response(self, client: BleakClient):
         self.response = UtecBleResponse(self, self.device)
-        notification_started = False
         try:
             logger.debug("Sending Ultraloq command %s", self.command.name)
-            await client.start_notify(self.uuid, self.response._receive_write_response)
-            notification_started = True
+            # send_requests() holds a single subscription for the connection and
+            # dispatches to whichever response is active, so only claim it here.
+            self.device._active_response = self.response
             await client.write_gatt_char(
                 self.uuid, self.encrypted_package(self.aes_key)
             )
@@ -484,14 +515,10 @@ class UtecBleRequest:
         except Exception as e:
             raise self.device.error(e)
         finally:
-            if notification_started:
-                try:
-                    await client.stop_notify(self.uuid)
-                except Exception as err:
-                    logger.debug(
-                        "Failed to stop Ultraloq notifications (%s)",
-                        type(err).__name__,
-                    )
+            # Stop routing notifications to this response; the connection-wide
+            # subscription is torn down by send_requests().
+            if self.device._active_response is self.response:
+                self.device._active_response = None
 
 
 class UtecBleResponse:
@@ -736,6 +763,19 @@ class UtecBleDeviceKey:
 
             await client.stop_notify(DeviceKeyUUID.ECC.value)
             device.debug("Received ECC public key")
+
+            # TEMPORARY DIAGNOSTIC -- remove once answered.
+            # The ECC handshake costs ~2.3s per command, almost all of it spent
+            # waiting for the lock to send this key. If the lock's public key is
+            # static across sessions we can cache it and skip the wait. A
+            # truncated hash is enough to compare runs without logging key
+            # material.
+            device.debug(
+                "ECC peer public key fingerprint=%s",
+                hashlib.sha256(
+                    bytes(received_pubkey[0]) + bytes(received_pubkey[1])
+                ).hexdigest()[:16],
+            )
 
             rec_key_point = Point(
                 SECP128r1.curve,
