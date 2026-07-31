@@ -5,11 +5,11 @@
 
 ---
 
-This public hardening fork is based on [inventor7777/ultraloq-ble-ha](https://github.com/inventor7777/ultraloq-ble-ha), itself [forked from maeneak/utecio-ha](https://github.com/maeneak/utecio-ha). The original MIT license and attribution are preserved.
+This is a [forked](https://github.com/maeneak/utecio-ha) Home Assistant custom integration for Ultraloq / U-Tec / Xthings BLE locks. The original MIT license and attribution are preserved.
 
-The fork retains upstream's local BLE model support and first-class battery, auto-lock, mode, and bolt-status entities. It adds credential-safe enrollment storage, allowlist-only diagnostics, secret-safe integration logging, protocol and state-transition tests, and compatibility validation against Home Assistant Core 2026.7.2.
+Alongside local BLE model support and first-class battery, auto-lock, mode, and bolt-status entities, it has credential-safe enrollment storage, allowlist-only diagnostics, secret-safe integration logging, and a protocol/state-transition test suite.
 
-`0.4.0-beta.1` is a supervised-test prerelease. Its automated coverage is synthetic; this fork has not yet been validated against the owner's physical original U-Bolt.
+Its automated coverage is synthetic; validate against your own hardware using [the supervised real-lock test plan](docs/supervised-real-lock-test-plan.md) before relying on it.
 
 ## Requirements
 
@@ -35,7 +35,7 @@ Important Bluetooth note:
 
 You can install using HACS:
 
-[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=chaseflick4&repository=ultraloq-ble-ha&category=integration)
+[![Open your Home Assistant instance and open a repository inside the Home Assistant Community Store.](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=inventor7777&repository=ultraloq-ble-ha&category=integration)
 
 Or manually:
 1. Open your Home Assistant config directory.
@@ -80,7 +80,7 @@ The documented [Xthings OpenAPI Discovery API](https://developer.xthings.com/hc/
 
 ### Home Assistant compatibility
 
-The automated suite targets Home Assistant Core 2026.7.2 and covers enrollment/config migration, diagnostics redaction, protocol/crypto fixtures, U-Bolt model mapping, Bluetooth adapter selection, and entity state transitions. A physical lock remains required for the supervised checks in [the real-lock test plan](docs/supervised-real-lock-test-plan.md).
+Requires Home Assistant 2024.10 or newer (for the config entry reconfigure flow). The automated suite covers enrollment/config migration, diagnostics redaction, protocol/crypto fixtures, U-Bolt model mapping, Bluetooth adapter selection, and entity state transitions. A physical lock remains required for the supervised checks in [the real-lock test plan](docs/supervised-real-lock-test-plan.md).
 
 ### Sensors
 
@@ -110,6 +110,6 @@ Check:
 - the lock is in Bluetooth range
 - your Home Assistant Bluetooth adapter or ESPHome proxy can make active connections
 - the lock is not only being seen as `connectable: false`
-- If the device is unsupported, report it in this fork's issue tracker without including credentials, identifiers, or packet captures.
+- If the device is unsupported, report it in the [issue tracker](https://github.com/inventor7777/ultraloq-ble-ha/issues) without including credentials, identifiers, or packet captures.
 
-This fork is experimental software for a physical-access device. Review the supervised real-lock test plan before issuing any write command, and never test unlock unattended.
+This is experimental software for a physical-access device. Review the supervised real-lock test plan before issuing any write command, and never test unlock unattended.

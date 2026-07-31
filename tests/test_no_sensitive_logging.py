@@ -4,17 +4,13 @@ import ast
 from pathlib import Path
 
 SENSITIVE_ATTRIBUTES = {
-    "address",
     "aes_key",
     "buffer",
-    "mac_uuid",
     "mobile_uuid",
     "package",
     "password",
-    "sn",
     "token",
     "uid",
-    "wurx_uuid",
 }
 SENSITIVE_NAMES = {
     "admin_pin",
@@ -22,18 +18,13 @@ SENSITIVE_NAMES = {
     "ciphertext",
     "email",
     "encrypted_packet",
-    "mac_uuid",
     "mobile_uuid",
     "packet",
     "password",
     "pin",
     "plaintext",
-    "serial",
-    "sn",
     "token",
     "uid",
-    "wake_address",
-    "wurx_uuid",
 }
 LOG_METHODS = {"debug", "info", "warning", "error", "exception"}
 

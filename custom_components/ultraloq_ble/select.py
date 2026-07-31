@@ -5,12 +5,17 @@ from __future__ import annotations
 from homeassistant.components.select import SelectEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry
 from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, UTEC_LOCKDATA
-from .utecio.ble.device import UtecBleDeviceError, UtecBleNotFoundError
+from .utecio.ble.device import (
+    UtecBleDeviceBusyError,
+    UtecBleDeviceError,
+    UtecBleNotFoundError,
+)
 from .utecio.ble.lock import UtecBleLock
 from .utecio.enums import DeviceLockStatus, DeviceLockWorkMode
 
@@ -109,8 +114,10 @@ class UltraloqLockModeSelect(SelectEntity):
         mode = DeviceLockWorkMode[option.upper().replace(" ", "_")]
         try:
             await self.lock.async_set_workmode(mode)
-        except (UtecBleDeviceError, UtecBleNotFoundError):
-            raise
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as err:
+            raise HomeAssistantError(
+                f"Failed to set lock mode for {self.lock.name}: {err}"
+            ) from err
 
         # Keep all entities in sync immediately after a successful command.
         self.lock.lock_mode = mode.value
