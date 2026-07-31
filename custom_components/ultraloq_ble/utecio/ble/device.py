@@ -176,7 +176,7 @@ class UtecBleDevice:
         if self.error_callback:
             self.error_callback(e)
 
-        self.debug("Ultraloq BLE operation failed (%s)", type(e).__name__)
+        self.debug("Ultraloq BLE operation failed (%s): %s", type(e).__name__, e)
         return e
 
     def debug(self, msg: object, *args: object):
@@ -336,12 +336,28 @@ class UtecBleDevice:
                     try:
                         await request._get_response(client)
                         self._requests.remove(request)
-
-                    except Exception:
+                    except (
+                        UtecBleDeviceError,
+                        UtecBleDeviceBusyError,
+                        UtecBleNotFoundError,
+                        UtecBleError,
+                    ):
+                        # _get_response() already logs and raises a specific,
+                        # secret-free error (timed out vs. rejected vs.
+                        # transport failure); let it propagate instead of
+                        # collapsing it into a generic "Command X failed" that
+                        # hides which one it was.
+                        raise
+                    except Exception as err:
+                        # Anything not already in our error hierarchy (e.g. a
+                        # raw BleakError) must still be wrapped, or callers
+                        # that only catch Utec* exceptions see it escape
+                        # unhandled. GATT/transport error text is protocol
+                        # diagnostics, not a secret, so keep it.
                         raise self.error(
                             UtecBleDeviceError(
                                 "Error communicating with the Ultraloq lock.",
-                                f"Command {request.command.name} failed.",
+                                f"Command {request.command.name} failed ({err}).",
                             )
                         ) from None
 
@@ -546,9 +562,26 @@ class UtecBleRequest:
             # send_requests() holds a single subscription for the connection and
             # dispatches to whichever response is active, so only claim it here.
             self.device._active_response = self.response
-            await client.write_gatt_char(
-                self.uuid, self.encrypted_package(self.aes_key)
-            )
+            try:
+                await client.write_gatt_char(
+                    self.uuid, self.encrypted_package(self.aes_key)
+                )
+            except Exception as write_err:
+                # The write-acknowledgement transaction (esp. relayed through
+                # a Bluetooth proxy) can fail at the transport layer after the
+                # lock has already processed the command and sent back a
+                # valid notification -- the notify callback runs concurrently
+                # with this await, not nested inside it. Only treat this as a
+                # real failure if no response has arrived yet; otherwise the
+                # write error is stale and the command already succeeded.
+                if not self.response.completed:
+                    raise
+                logger.debug(
+                    "Ignoring write-acknowledgement error for %s"
+                    " (%s); a valid response already arrived",
+                    self.command.name,
+                    type(write_err).__name__,
+                )
             try:
                 await asyncio.wait_for(
                     self.response.response_completed.wait(),
