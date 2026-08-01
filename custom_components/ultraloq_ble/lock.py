@@ -1,14 +1,11 @@
 """Lock platform for Ultraloq integration."""
 from __future__ import annotations
 
-from typing import Any
+import asyncio
 from datetime import timedelta
+from typing import Any
 
 from bleak.backends.device import BLEDevice
-from .utecio.ble.lock import UtecBleLock
-from .utecio.ble.device import UtecBleNotFoundError, UtecBleDeviceError
-from .utecio.enums import DeviceBatteryLevel, DeviceLockStatus, DeviceLockWorkMode
-
 from homeassistant.components import bluetooth
 from homeassistant.components.lock import (
     LockEntity,
@@ -19,8 +16,9 @@ from homeassistant.const import (
     CONF_SCAN_INTERVAL,
 )
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import device_registry
+from homeassistant.helpers.device_registry import CONNECTION_BLUETOOTH, DeviceInfo
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.event import async_call_later
 
@@ -32,6 +30,18 @@ from .const import (
     LOGGER,
     UTEC_LOCKDATA,
 )
+from .utecio.ble.device import (
+    UtecBleDeviceBusyError,
+    UtecBleDeviceError,
+    UtecBleNotFoundError,
+)
+from .utecio.ble.lock import UtecBleLock
+from .utecio.enums import DeviceBatteryLevel, DeviceLockStatus, DeviceLockWorkMode
+
+# A resync connects fresh and can hit the same transient BLE failure that
+# triggered it, so one attempt isn't reliable enough on a flaky proxy link.
+RESYNC_ATTEMPTS = 3
+RESYNC_RETRY_DELAY_SECONDS = 1.5
 
 
 async def async_setup_entry(
@@ -206,8 +216,7 @@ class UtecLock(LockEntity):
         self._transition_timeout_cancel = None
         if self._attr_is_locking or self._attr_is_unlocking:
             LOGGER.warning(
-                "Clearing stale transition state for %s after %s seconds",
-                self.name,
+                "Clearing stale Ultraloq transition state after %s seconds",
                 self._transition_timeout_seconds,
             )
             self._clear_transition_state()
@@ -400,15 +409,45 @@ class UtecLock(LockEntity):
         LOGGER.debug("Updating %s with scan interval: %s", self.name, self.scaninterval)
         self._update_in_progress = True
         try:
-            await self.lock.async_update_status()
+            # Background poll: if a user command holds the device this refresh
+            # is redundant, so skip it rather than queue behind or raise. The
+            # rescan button deliberately does not pass this -- a user-driven
+            # refresh must wait and report rather than silently no-op.
+            await self.lock.async_update_status(skip_if_busy=True)
             self._sync_state_from_lock()
             LOGGER.info("(%s) Updated.", self.name)
-        except (UtecBleDeviceError, UtecBleNotFoundError) as e:
-            LOGGER.error(e)
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
+            LOGGER.error("(%s) Update failed (%s)", self.name, type(e).__name__)
         finally:
             self._update_in_progress = False
             self._notify_lock_state_listeners()
             self.schedule_update_lock_state(self.scaninterval)
+
+    async def _resync_after_failed_command(self) -> None:
+        """Re-query real lock state after a failed command.
+
+        A failed write can still have reached the lock -- the local
+        write-acknowledgement can error out through a Bluetooth proxy after
+        the lock already executed it and its response was lost. Keeping the
+        old cached state in that case would show the wrong lock state, which
+        is worse than a slower error. Each attempt is a fresh connection and
+        can hit the same transient failure that triggered the resync, so this
+        retries a few times. It's still best-effort: if every attempt fails,
+        fall back to the last-known state rather than raising a second error
+        that would replace the original failure.
+        """
+
+        for attempt in range(1, RESYNC_ATTEMPTS + 1):
+            try:
+                await self.lock.async_update_status()
+                self._sync_state_from_lock()
+                break
+            except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError):
+                if attempt < RESYNC_ATTEMPTS:
+                    await asyncio.sleep(RESYNC_RETRY_DELAY_SECONDS)
+        self._clear_transition_state()
+        self._notify_lock_state_listeners()
+        self.async_write_ha_state()
 
     async def async_lock(self, **kwargs):
         """Lock the lock."""
@@ -421,10 +460,10 @@ class UtecLock(LockEntity):
             self._sync_state_from_lock()
             self._notify_lock_state_listeners()
             self.async_write_ha_state()
-        except (UtecBleDeviceError, UtecBleNotFoundError) as e:
-            self._clear_transition_state()
-            self.async_write_ha_state()
-            LOGGER.error(e)
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
+            await self._resync_after_failed_command()
+            LOGGER.error("(%s) Lock command failed (%s)", self.name, type(e).__name__)
+            raise HomeAssistantError("Ultraloq lock command failed") from e
 
     async def async_unlock(self, **kwargs):
         """Unlock the lock."""
@@ -437,11 +476,24 @@ class UtecLock(LockEntity):
             self._sync_state_from_lock()
             self._notify_lock_state_listeners()
             self.async_write_ha_state()
-        except (UtecBleDeviceError, UtecBleNotFoundError) as e:
-            self._clear_transition_state()
-            self.async_write_ha_state()
-            LOGGER.error(e)
+            if self.lock.capabilities.autolock and self.lock.autolock_time:
+                async_call_later(
+                    self.hass,
+                    timedelta(seconds=self.lock.autolock_time),
+                    self._handle_autolock_due,
+                )
+        except (UtecBleDeviceBusyError, UtecBleDeviceError, UtecBleNotFoundError) as e:
+            await self._resync_after_failed_command()
+            LOGGER.error("(%s) Unlock command failed (%s)", self.name, type(e).__name__)
+            raise HomeAssistantError("Ultraloq unlock command failed") from e
 
     async def async_open(self, **kwargs: Any) -> None:
         """Open the door latch."""
         return await self.async_unlock(**kwargs)
+
+    @callback
+    def _handle_autolock_due(self, _now) -> None:
+        """Poll instead of inventing a locked state when auto-lock is due."""
+
+        LOGGER.debug("Ultraloq auto-lock interval elapsed; requesting status")
+        self.request_update()

@@ -15,7 +15,6 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN, UTEC_LOCKDATA
 from .utecio.ble.lock import UtecBleLock
-from .utecio.ble.device import UtecBleDeviceError, UtecBleNotFoundError
 from .utecio.enums import DeviceLockStatus
 
 
@@ -88,22 +87,18 @@ class UltraloqAutolockNumber(NumberEntity):
             "manufacturer": "U-tec",
             "model": self.lock.model or "Ultraloq Lock",
         }
-        if self.lock.sn:
-            info["serial_number"] = self.lock.sn
         return info
 
     async def async_set_native_value(self, value: float) -> None:
         """Set the auto-lock timer in seconds."""
 
         seconds = int(value)
-        try:
-            await self.lock.async_set_autolock(seconds)
-        except (UtecBleDeviceError, UtecBleNotFoundError):
-            raise
-        else:
-            self.async_write_ha_state()
-            for callback_func in list(self.lock._ha_state_callbacks):
-                callback_func()
+        # Errors propagate to HA unchanged; state is only written once the lock
+        # has actually accepted the new value.
+        await self.lock.async_set_autolock(seconds)
+        self.async_write_ha_state()
+        for callback_func in list(self.lock._ha_state_callbacks):
+            callback_func()
 
     async def async_added_to_hass(self) -> None:
         """Register shared state callback."""

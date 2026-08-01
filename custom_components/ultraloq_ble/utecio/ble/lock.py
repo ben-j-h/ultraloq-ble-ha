@@ -1,5 +1,3 @@
-import datetime
-
 from ..enums import BLECommandCode, DeviceLockWorkMode
 from ..util import to_byte_array
 from .device import UtecBleDevice, UtecBleRequest
@@ -24,76 +22,110 @@ class UtecBleLock(UtecBleDevice):
             device_model=device_model,
         )
 
-    async def async_unlock(self, update: bool = True):
-        self.add_request(
-            UtecBleRequest(BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True)
-        )
-        self.add_request(
-            UtecBleRequest(BLECommandCode.UNLOCK, device=self, auth_required=True)
-        )
-        if update:
-            self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
+    # Every method here queues through execute() so that queueing and sending
+    # stay atomic against the status poll and against each other. Never call
+    # add_request()/send_requests() directly from this class -- see
+    # UtecBleDevice.execute().
 
-        await self.send_requests()
-
-    async def async_lock(self, update: bool = True):
-        self.add_request(
-            UtecBleRequest(BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True)
-        )
-        self.add_request(
-            UtecBleRequest(BLECommandCode.BOLT_LOCK, device=self, auth_required=True)
-        )
-        if update:
-            self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
-
-        await self.send_requests()
-
-    async def async_reboot(self) -> bool:
-        self.add_request(UtecBleRequest(BLECommandCode.REBOOT))
-        return await self.send_requests()
-
-    async def async_set_workmode(self, mode: DeviceLockWorkMode):
-        self.add_request(
-            UtecBleRequest(BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True)
-        )
-        if self.capabilities.bt264:
-            self.add_request(
-                UtecBleRequest(BLECommandCode.SET_LOCK_STATUS, data=bytes([mode.value]))
-            )
-        else:
-            self.add_request(
-                UtecBleRequest(BLECommandCode.SET_WORK_MODE, data=bytes([mode.value]))
-            )
-
-        await self.send_requests()
-
-    async def async_set_autolock(self, seconds: int):
-        if self.capabilities.autolock:
-            self.add_request(
-                UtecBleRequest(BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True)
-            )
+    async def async_unlock(self, update: bool = True) -> bool:
+        def queue():
             self.add_request(
                 UtecBleRequest(
-                    BLECommandCode.SET_AUTOLOCK,
-                    data=to_byte_array(seconds, 2) + bytes([0]),
+                    BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True
                 )
             )
-        await self.send_requests()
+            self.add_request(
+                UtecBleRequest(BLECommandCode.UNLOCK, device=self, auth_required=True)
+            )
+            if update:
+                self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
 
-    async def async_update_status(self):
-        self.debug("(%s) %s - Updating lock data...", self.mac_uuid, self.name)
-        self.add_request(
-            UtecBleRequest(BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True)
-        )
-        self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
-        if not self.capabilities.bt264:
-            self.add_request(UtecBleRequest(BLECommandCode.GET_LOCK_STATUS))
-            self.add_request(UtecBleRequest(BLECommandCode.GET_BATTERY))
-            self.add_request(UtecBleRequest(BLECommandCode.GET_MUTE))
+        return await self.execute(queue)
 
-        if self.capabilities.autolock:
-            self.add_request(UtecBleRequest(BLECommandCode.GET_AUTOLOCK))
+    async def async_lock(self, update: bool = True) -> bool:
+        def queue():
+            self.add_request(
+                UtecBleRequest(
+                    BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True
+                )
+            )
+            self.add_request(
+                UtecBleRequest(BLECommandCode.BOLT_LOCK, device=self, auth_required=True)
+            )
+            if update:
+                self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
 
-        # self.add_request(BleRequest(device=self, command=BLECommandCode.READ_TIME))
-        await self.send_requests()
-        self.debug("(%s) %s - Update Successful.", self.mac_uuid, self.name)
+        return await self.execute(queue)
+
+    async def async_reboot(self) -> bool:
+        def queue():
+            self.add_request(UtecBleRequest(BLECommandCode.REBOOT))
+
+        return await self.execute(queue)
+
+    async def async_set_workmode(self, mode: DeviceLockWorkMode) -> bool:
+        def queue():
+            self.add_request(
+                UtecBleRequest(
+                    BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True
+                )
+            )
+            if self.capabilities.bt264:
+                self.add_request(
+                    UtecBleRequest(
+                        BLECommandCode.SET_LOCK_STATUS, data=bytes([mode.value])
+                    )
+                )
+            else:
+                self.add_request(
+                    UtecBleRequest(
+                        BLECommandCode.SET_WORK_MODE, data=bytes([mode.value])
+                    )
+                )
+
+        return await self.execute(queue)
+
+    async def async_set_autolock(self, seconds: int) -> bool:
+        # On a lock without autolock support this queues nothing, and execute()
+        # returns False rather than raising "No commands to send."
+        def queue():
+            if self.capabilities.autolock:
+                self.add_request(
+                    UtecBleRequest(
+                        BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True
+                    )
+                )
+                self.add_request(
+                    UtecBleRequest(
+                        BLECommandCode.SET_AUTOLOCK,
+                        data=to_byte_array(seconds, 2) + bytes([0]),
+                    )
+                )
+
+        return await self.execute(queue)
+
+    async def async_update_status(self, skip_if_busy: bool = False) -> bool:
+        # The caller owns this policy, not this method. A background poll
+        # displaced by a user command is redundant (lock/unlock queue
+        # LOCK_STATUS themselves) and passes skip_if_busy=True. A user-driven
+        # refresh -- the rescan button -- must wait and report, never silently
+        # no-op, so it takes the default.
+        def queue():
+            self.add_request(
+                UtecBleRequest(
+                    BLECommandCode.ADMIN_LOGIN, device=self, auth_required=True
+                )
+            )
+            self.add_request(UtecBleRequest(BLECommandCode.LOCK_STATUS))
+            if not self.capabilities.bt264:
+                self.add_request(UtecBleRequest(BLECommandCode.GET_LOCK_STATUS))
+                self.add_request(UtecBleRequest(BLECommandCode.GET_BATTERY))
+                self.add_request(UtecBleRequest(BLECommandCode.GET_MUTE))
+
+            if self.capabilities.autolock:
+                self.add_request(UtecBleRequest(BLECommandCode.GET_AUTOLOCK))
+
+        self.debug("Updating Ultraloq lock data")
+        sent = await self.execute(queue, skip_if_busy=skip_if_busy)
+        self.debug("Ultraloq lock update %s", "completed" if sent else "skipped")
+        return sent
